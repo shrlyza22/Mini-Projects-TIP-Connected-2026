@@ -28,6 +28,8 @@ Run:  sudo python3 ztna_net.py
 Then: mininet> h1 python3 pep_client.py
 """
 
+import time
+
 import requests
 from requests.auth import HTTPBasicAuth
 
@@ -98,7 +100,7 @@ def start_services(net):
     # h4 (guest) intentionally offers nothing
 
 
-def _push_flow_restconf(node, flow_id, priority, match, out_port):
+def _push_flow_restconf(node, flow_id, priority, match, out_port, retries=3, delay=2):
     """
     PUT one flow straight into ODL's config datastore via RESTCONF, so it
     survives switch reconnect / reconciliation (unlike a flow added via
@@ -106,6 +108,14 @@ def _push_flow_restconf(node, flow_id, priority, match, out_port):
 
     `out_port` is either a switch port number (int/str) or the literal
     string "CONTROLLER" to punt the packet up to ODL.
+
+    Only retries on TRANSIENT failures (connection error, timeout) — right
+    after net.start(), ODL may not have finished the OpenFlow handshake
+    with the switch yet, which can make the very first attempt fail even
+    though everything else is correct. A 401/403 is NOT transient — it
+    means the credentials were rejected, and retrying that repeatedly
+    across ~15 flows is exactly what can trip an account-lockout policy
+    in odl-aaa-shiro. So auth failures fail fast, after a single attempt.
     """
     url = (f"{RESTCONF_BASE}/opendaylight-inventory:nodes/node={node}"
            f"/flow-node-inventory:table=0/flow={flow_id}")
@@ -120,40 +130,116 @@ def _push_flow_restconf(node, flow_id, priority, match, out_port):
             }]},
         }]},
     }]}
+
+    for attempt in range(1, retries + 1):
+        try:
+            r = requests.put(url, json=body, auth=RESTCONF_AUTH,
+                              headers={"Content-Type": "application/json"}, timeout=5)
+            if r.status_code in (200, 201, 204):
+                return True
+            if r.status_code in (401, 403):
+                print(f"  [restconf] PUT {node} flow={flow_id} -> HTTP {r.status_code} "
+                      "(auth rejected — not retrying, check ODL credentials)")
+                return False
+            print(f"  [restconf] PUT {node} flow={flow_id} attempt {attempt}/{retries} -> HTTP {r.status_code}")
+        except requests.RequestException as e:
+            print(f"  [restconf] PUT {node} flow={flow_id} attempt {attempt}/{retries} error: {e}")
+        if attempt < retries:
+            time.sleep(delay)
+    return False
+
+
+#   Ring adjacency (fixed, matches RingTopo.build()): each switch's
+#   port1 = its own host, port2 = link "forward" to the next switch,
+#   port3 = link "back" to the previous switch, ring order s1-s2-s3-s4-s1.
+#
+#   Forward direction (host -> PDP): the next hop toward s1 for each
+#   switch. s2 and s4 sit directly next to s1 (1 hop); s3 is 2 hops away
+#   either direction, routed here via s2 to match the path PDP itself
+#   prints for h3/iot ("s1 -> 2 -> 3").
+FORWARD_NEXT_HOP = {
+    "openflow:2": 3,   # s2 -> s1 directly
+    "openflow:3": 3,   # s3 -> s2 (which then relays -> s1 via its own rule)
+    "openflow:4": 2,   # s4 -> s1 directly
+}
+
+#   Return direction (PDP -> host): per-switch, per-destination-host
+#   output port, so replies actually reach whichever host asked — instead
+#   of being blindly sent out h1's port regardless of who logged in.
+RETURN_HOPS = {
+    "openflow:1": {"10.0.0.1": 1, "10.0.0.2": 2, "10.0.0.3": 2, "10.0.0.4": 3},
+    "openflow:2": {"10.0.0.2": 1, "10.0.0.3": 2},
+    "openflow:3": {"10.0.0.3": 1},
+    "openflow:4": {"10.0.0.4": 1},
+}
+
+
+def _delete_flow_restconf(node, flow_id):
+    """DELETE one flow from ODL's config datastore, if it exists. Used to
+    clean up flow IDs from an older version of this script that would
+    otherwise linger and conflict with the new ones (same priority, more
+    permissive match — can shadow the per-host return flows below)."""
+    url = (f"{RESTCONF_BASE}/opendaylight-inventory:nodes/node={node}"
+           f"/flow-node-inventory:table=0/flow={flow_id}")
     try:
-        r = requests.put(url, json=body, auth=RESTCONF_AUTH,
-                          headers={"Content-Type": "application/json"}, timeout=5)
-        return r.status_code in (200, 201, 204)
-    except requests.RequestException as e:
-        print(f"  [restconf] PUT {node} flow={flow_id} error: {e}")
-        return False
+        requests.delete(url, auth=RESTCONF_AUTH, timeout=5)
+    except requests.RequestException:
+        pass
 
 
 def install_pdp_carveout(net, nat):
     """
-    Two high-priority flows on s1 so h1 can always reach the PDP portal.
-    Pushed via RESTCONF (not dpctl) so they persist in ODL's config
-    datastore and don't disappear after a switch reconnect/reconciliation.
+    Flows so ANY host (h1-h4) can reach the PDP portal, not just h1.
+
+    The original design only carved out a path for h1 (the only switch
+    with a rule at all was s1, where the NAT lives) — h2/h3/h4 had zero
+    flow permitting traffic toward PDP on their own switch, so their
+    packets were dropped by priority=0 before ever entering the ring.
+    That's exactly why h4/bob's login timed out while h1/alice worked.
+
+    This installs, via RESTCONF (config datastore, survives reconnects):
+      - one forward flow per switch: any packet to PDP_IP hops toward s1.
+      - one return flow per (switch, host) pair along that host's actual
+        path back from s1, so replies land on the right host.
     """
     nat_port = s1_port_to(net, nat)
     if nat_port is None:
         print("[carveout] ERROR: could not find s1<->nat0 link"); return
 
-    ip_match = {"ethernet-match": {"ethernet-type": {"type": 2048}}}  # IPv4
+    # Clean up the old h1-only flow IDs from a previous version of this
+    # script — same priority (200) but a looser match, which can shadow
+    # the new per-host return flows below.
+    _delete_flow_restconf("openflow:1", "carveout-dst")
+    _delete_flow_restconf("openflow:1", "carveout-src")
 
-    ok_dst = _push_flow_restconf(
-        "openflow:1", "carveout-dst", 200,
+    ip_match = {"ethernet-match": {"ethernet-type": {"type": 2048}}}  # IPv4
+    ok = True
+
+    # Forward: dst=PDP_IP, hop toward s1 (single rule set covers every host)
+    ok &= _push_flow_restconf(
+        "openflow:1", "carveout-fwd", 200,
         {**ip_match, "ipv4-destination": f"{ODL_IP}/32"}, nat_port,
     )
-    ok_src = _push_flow_restconf(
-        "openflow:1", "carveout-src", 200,
-        {**ip_match, "ipv4-source": f"{ODL_IP}/32"}, 1,
-    )
+    for node, port in FORWARD_NEXT_HOP.items():
+        ok &= _push_flow_restconf(
+            node, "carveout-fwd", 200,
+            {**ip_match, "ipv4-destination": f"{ODL_IP}/32"}, port,
+        )
 
-    if ok_dst and ok_src:
-        print("[carveout] h1 <-> PDP (%s) via s1 port %d (installed via RESTCONF)" % (ODL_IP, nat_port))
+    # Return: src=PDP_IP + dst=<host ip>, hop toward that specific host
+    for node, hop_table in RETURN_HOPS.items():
+        for host_ip, port in hop_table.items():
+            flow_id = "carveout-ret-" + host_ip.split(".")[-1]
+            ok &= _push_flow_restconf(
+                node, flow_id, 200,
+                {**ip_match, "ipv4-source": f"{ODL_IP}/32",
+                 "ipv4-destination": f"{host_ip}/32"}, port,
+            )
+
+    if ok:
+        print("[carveout] h1-h4 <-> PDP (%s) installed via RESTCONF (all hosts covered)" % ODL_IP)
     else:
-        print("[carveout] WARNING: one or both flows failed to install via RESTCONF — "
+        print("[carveout] WARNING: one or more flows failed to install via RESTCONF — "
               "check ODL is reachable at %s:8181" % ODL_IP)
 
 
