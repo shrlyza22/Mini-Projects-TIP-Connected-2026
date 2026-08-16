@@ -10,8 +10,9 @@ Flow of one session:
      -> provision directed flows along the shortest ring path via RESTCONF
      -> return the granted access map
 
-Enforcement lives in the OVS flow tables (default-drop). This app only decides
-and pushes flows; it never carries data traffic.
+Enforcement lives in the OVS flow tables. The PDP installs persistent
+default-deny rules and temporary higher-priority per-session ALLOW rules; it
+never carries data traffic itself.
 
 Run:   pip install flask requests
        sudo python3 pdp.py            # binds 0.0.0.0:5000
@@ -41,20 +42,25 @@ ALLOWED_HOURS = range(0, 24)       # e.g. range(7, 22) for 07:00-21:59 only
 
 # Trust score weights and tier bands (matches T(s,t) from the report)
 W_R, W_C, W_B = 0.5, 0.3, 0.2
-TIER_FULL, TIER_LIMITED = 70, 40   # >=70 Full, 40-69 Limited, <40 Denied
+TIER_FULL, TIER_LIMITED = 70, 40   # >= 70: FULL, >= 40: LIMITED, < 40: DENIED
 
 # Base identity score per role
 R_BY_ROLE = {"research": 80, "server": 95, "iot": 50, "guest": 30}
 
 # Users -> credentials + role/segment
 USERS = {
-    "alice": {"password": "research123", "role": "research"},
-    "bob":   {"password": "guest123",    "role": "guest"},
+    "ratih": {"password": "research123", "role": "research"},
+    "bima":   {"password": "guest123",    "role": "guest"},
 }
 
 # ---------------------------------------------------------------------------
 # TOPOLOGY  (4-switch ring; host on port 1 of its own switch)
-#   s1-s2-s3-s4-s1 ; each addLink(a,b,port1=2,port2=3)
+# Actual Mininet port layout:
+#   h1--s1:1, h2--s2:1, h3--s3:1, h4--s4:1
+#   s1:2 <-> s2:2
+#   s2:3 <-> s3:2
+#   s3:3 <-> s4:2
+#   s4:3 <-> s1:3
 # ---------------------------------------------------------------------------
 HOST = {  # ip -> (segment, mac, switch node-id)
     "10.0.0.1": ("research", "00:00:00:00:00:01", "openflow:1"),
@@ -73,10 +79,21 @@ ADJ = {
 }
 # egress port on switch A toward switch B
 LINK_PORT = {
-    ("openflow:1", "openflow:2"): 2, ("openflow:2", "openflow:1"): 3,
-    ("openflow:2", "openflow:3"): 2, ("openflow:3", "openflow:2"): 3,
-    ("openflow:3", "openflow:4"): 2, ("openflow:4", "openflow:3"): 3,
-    ("openflow:4", "openflow:1"): 2, ("openflow:1", "openflow:4"): 3,
+    # direct upper link: s1-eth2 <-> s2-eth2
+    ("openflow:1", "openflow:2"): 2,
+    ("openflow:2", "openflow:1"): 2,
+
+    # right link: s2-eth3 <-> s3-eth2
+    ("openflow:2", "openflow:3"): 3,
+    ("openflow:3", "openflow:2"): 2,
+
+    # lower link: s3-eth3 <-> s4-eth2
+    ("openflow:3", "openflow:4"): 3,
+    ("openflow:4", "openflow:3"): 2,
+
+    # left link: s4-eth3 <-> s1-eth3
+    ("openflow:4", "openflow:1"): 3,
+    ("openflow:1", "openflow:4"): 3,
 }
 
 # ---------------------------------------------------------------------------
@@ -92,6 +109,13 @@ POLICY = {
 MIN_SCORE = {"server": TIER_FULL, "iot": TIER_LIMITED, "guest": TIER_LIMITED}
 # In the Limited tier we drop the sensitive ports and keep only these:
 LIMITED_PORTS = {80, 8080}
+
+# OpenFlow priority hierarchy
+# 300+ : reserved for PEP/PDP reachability carve-outs in the Mininet topology
+# 250  : temporary per-session ALLOW flows installed by this PDP
+# 200  : persistent DEFAULT-DENY flows installed by this PDP
+PRIO_SESSION = 250
+PRIO_DEFAULT_DENY = 200
 
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
@@ -206,6 +230,63 @@ def _delete_flow(node, fid):
     return True
 
 
+def _drop_json(fid, priority, dst_ip):
+    """Persistent IPv4 default-deny rule for a protected data-plane host."""
+    return {"flow-node-inventory:flow": [{
+        "id": str(fid), "table_id": 0, "priority": priority,
+        "match": {
+            "ethernet-match": {
+                "ethernet-type": {"type": 2048},
+            },
+            "ipv4-destination": f"{dst_ip}/32",
+        },
+        "instructions": {"instruction": [{
+            "order": 0,
+            "apply-actions": {"action": [{
+                "order": 0,
+                "drop-action": {},
+            }]},
+        }]},
+    }]}
+
+
+def install_default_deny():
+    """Install persistent default-deny rules below session ALLOW priority.
+
+    ODL/L2Switch may install lower-priority forwarding rules. These rules keep
+    the data plane closed by default; an authenticated session is opened only
+    by the more-specific PRIO_SESSION flows and closes again after logout.
+    ARP is intentionally not blocked so hosts can still resolve next hops.
+    """
+    installed = 0
+    base_id = 9000
+    for sw_idx, node in enumerate(ADJ, start=1):
+        for host_idx, dst_ip in enumerate(HOST, start=1):
+            fid = str(base_id + sw_idx * 10 + host_idx)
+            body = _drop_json(fid, PRIO_DEFAULT_DENY, dst_ip)
+            if _put_flow(node, fid, body):
+                installed += 1
+    print(f"[default-deny] installed/refreshed {installed} rules "
+          f"at priority {PRIO_DEFAULT_DENY}")
+    return installed
+
+
+def revoke_existing_sessions(user, ip):
+    """Keep only one active access session per identity/IP."""
+    stale = [token for token, sess in SESSIONS.items()
+             if sess["user"] == user and sess["ip"] == ip]
+    revoked = 0
+    for token in stale:
+        sess = SESSIONS.pop(token)
+        for node, fid in sess["flows"]:
+            _delete_flow(node, fid)
+            revoked += 1
+    if stale:
+        print(f"[session] auto-revoked {len(stale)} old session(s) "
+              f"for {user}@{ip} ({revoked} flows)")
+    return revoked
+
+
 def _install_along(path, dst_sw, smac, sip, dip, port, is_return):
     """Install one directed flow on every switch along `path` (endpoints incl.).
     Forward matches tcp dst-port; return matches tcp src-port. Symmetric because
@@ -214,7 +295,7 @@ def _install_along(path, dst_sw, smac, sip, dip, port, is_return):
     for i, node in enumerate(path):
         out_port = HOST_PORT if node == dst_sw else LINK_PORT[(node, path[i + 1])]
         fid = next_flow_id()
-        body = _flow_json(fid, 50, smac, sip, dip, port, out_port)
+        body = _flow_json(fid, PRIO_SESSION, smac, sip, dip, port, out_port)
         if is_return:
             m = body["flow-node-inventory:flow"][0]["match"]
             del m["tcp-destination-port"]
@@ -224,12 +305,12 @@ def _install_along(path, dst_sw, smac, sip, dip, port, is_return):
     return installed
 
 
-def provision_session(client_ip, res_ip, port):
+def provision_session(client_ip, client_mac, res_ip, port):
     """Provision both directions for client<->resource:port over one shortest
     path (return leg is the forward path reversed => symmetric routing)."""
     c_sw, r_sw = HOST[client_ip][2], HOST[res_ip][2]
     path = shortest_path(c_sw, r_sw)
-    fwd = _install_along(path, r_sw, HOST[client_ip][1],
+    fwd = _install_along(path, r_sw, client_mac,
                          client_ip, res_ip, port, is_return=False)
     ret = _install_along(path[::-1], c_sw, HOST[res_ip][1],
                          res_ip, client_ip, port, is_return=True)
@@ -290,6 +371,9 @@ def login():
         return jsonify(ok=False, tier=tier, trust=T, detail=parts,
                        error="trust below threshold"), 403
 
+    # Prevent overlapping/stale ALLOW rules for the same host.
+    revoke_existing_sessions(user, ip)
+
     granted = evaluate(role, ip, mac, T, tier)
     token = uuid.uuid4().hex[:12]
     flows = []
@@ -298,7 +382,7 @@ def login():
         dst_ip = SEG_IP[dst_seg]
         path = None
         for port in info["ports"]:
-            session_flows, path = provision_session(ip, dst_ip, port)
+            session_flows, path = provision_session(ip, mac, dst_ip, port)
             flows += session_flows
         info["path"] = path
     print(f"[login] {user} ({role}) T={T} {tier} -> {len(flows)} flows in "
@@ -330,11 +414,21 @@ if __name__ == "__main__":
     ap.add_argument("--dry-run", action="store_true",
                     help="print RESTCONF JSON instead of calling ODL")
     ap.add_argument("--port", type=int, default=5000)
+    ap.add_argument("--full-threshold", type=float, default=TIER_FULL,
+                    help="min trust score for FULL tier")
+    ap.add_argument("--limited-threshold", type=float, default=TIER_LIMITED,
+                    help="min trust score for LIMITED tier")
     args = ap.parse_args()
     DRY_RUN = args.dry_run
-    # Portal reachability (carve-out) + static ARP are set up on the Mininet
-    # side (ztna_net.py) where the NAT port number is known. Behind the NAT the
-    # PDP sees VM2's mgmt IP as remote_addr, so /login falls back to the
-    # client-reported ip for the subnet check; identity is still hard-enforced
-    # by the eth-src match in every installed flow.
+
+    # override threshold + resync MIN_SCORE (dict-nya dihitung sekali di atas,
+    # jadi harus di-update manual di sini kalau threshold-nya diganti)
+    TIER_FULL, TIER_LIMITED = args.full_threshold, args.limited_threshold
+    MIN_SCORE["server"] = TIER_FULL
+    MIN_SCORE["iot"] = TIER_LIMITED
+    MIN_SCORE["guest"] = TIER_LIMITED
+
+    # Closed-by-default baseline; session ALLOW rules have higher priority.
+    install_default_deny()
+
     app.run(host="0.0.0.0", port=args.port)
