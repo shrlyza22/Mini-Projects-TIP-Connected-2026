@@ -124,6 +124,19 @@ SESSIONS = {}          # token -> dict(user, role, ip, mac, flows=[...])
 _flow_id = 100         # monotonically increasing ODL flow id
 DRY_RUN = False
 
+# Performance instrumentation (surfaced via /metrics). Kept intentionally
+# dependency-free so it still works in --dry-run and on minimal VMs.
+METRICS = {
+    "logins": 0,
+    "logouts": 0,
+    "flows_installed": 0,
+    "flows_revoked": 0,
+    "last_provision_ms": None,
+    "last_revoke_ms": None,
+}
+FLOW_PUT_MS = []       # rolling per-flow RESTCONF PUT latency, in milliseconds
+FLOW_PUT_MS_MAX = 1000
+
 
 def next_flow_id():
     global _flow_id
@@ -206,14 +219,20 @@ def _put_flow(node, fid, body):
         import json
         print(f"PUT {url}\n{json.dumps(body)}\n")
         return True
+    started = time.perf_counter()
     try:
         r = SESSION.put(url, json=body, auth=ODL_AUTH,
                         headers={"Content-Type": "application/json"}, timeout=5)
     except requests.RequestException as e:
         print(f"  [PUT {node} flow={fid}] ERROR {e}")
         return False
+    FLOW_PUT_MS.append(round((time.perf_counter() - started) * 1000, 2))
+    if len(FLOW_PUT_MS) > FLOW_PUT_MS_MAX:
+        del FLOW_PUT_MS[:len(FLOW_PUT_MS) - FLOW_PUT_MS_MAX]
     ok = r.status_code in (200, 201, 204)
-    if not ok:
+    if ok:
+        METRICS["flows_installed"] += 1
+    else:
         print(f"  [PUT {node} flow={fid}] {r.status_code} {r.text[:200]}")
     return ok
 
@@ -377,7 +396,7 @@ def login():
     granted = evaluate(role, ip, mac, T, tier)
     token = uuid.uuid4().hex[:12]
     flows = []
-    t0 = time.time()
+    t0 = time.perf_counter()
     for dst_seg, info in granted.items():
         dst_ip = SEG_IP[dst_seg]
         path = None
@@ -385,12 +404,15 @@ def login():
             session_flows, path = provision_session(ip, mac, dst_ip, port)
             flows += session_flows
         info["path"] = path
+    provision_ms = round((time.perf_counter() - t0) * 1000, 1)
+    METRICS["logins"] += 1
+    METRICS["last_provision_ms"] = provision_ms
     print(f"[login] {user} ({role}) T={T} {tier} -> {len(flows)} flows in "
-          f"{time.time() - t0:.1f}s : {', '.join(granted) or 'none'}")
+          f"{provision_ms:.1f} ms : {', '.join(granted) or 'none'}")
     SESSIONS[token] = {"user": user, "role": role, "ip": ip, "mac": mac,
                        "flows": flows, "ts": time.time()}
     return jsonify(ok=True, token=token, role=role, trust=T, tier=tier,
-                   detail=parts, granted=granted)
+                   detail=parts, granted=granted, provision_ms=provision_ms)
 
 
 @app.route("/logout", methods=["POST"])
@@ -399,14 +421,45 @@ def logout():
     sess = SESSIONS.pop(data.get("token", ""), None)
     if not sess:
         return jsonify(ok=False, error="unknown token"), 404
+    started = time.perf_counter()
     for node, fid in sess["flows"]:
         _delete_flow(node, fid)
-    return jsonify(ok=True, revoked=len(sess["flows"]))
+    revoke_ms = round((time.perf_counter() - started) * 1000, 1)
+    METRICS["logouts"] += 1
+    METRICS["flows_revoked"] += len(sess["flows"])
+    METRICS["last_revoke_ms"] = revoke_ms
+    return jsonify(ok=True, revoked=len(sess["flows"]), revoke_ms=revoke_ms)
 
 
 @app.route("/health")
 def health():
     return jsonify(ok=True, sessions=len(SESSIONS))
+
+
+@app.route("/metrics")
+def metrics():
+    samples = sorted(FLOW_PUT_MS)
+
+    def percentile(p):
+        if not samples:
+            return None
+        index = min(len(samples) - 1, round((p / 100.0) * (len(samples) - 1)))
+        return samples[index]
+
+    return jsonify(
+        sessions=len(SESSIONS),
+        logins=METRICS["logins"],
+        logouts=METRICS["logouts"],
+        flows_installed=METRICS["flows_installed"],
+        flows_revoked=METRICS["flows_revoked"],
+        last_provision_ms=METRICS["last_provision_ms"],
+        last_revoke_ms=METRICS["last_revoke_ms"],
+        flow_put_samples=len(samples),
+        flow_put_ms_avg=round(sum(samples) / len(samples), 2) if samples else None,
+        flow_put_ms_p50=percentile(50),
+        flow_put_ms_p95=percentile(95),
+        flow_put_ms_max=samples[-1] if samples else None,
+    )
 
 
 if __name__ == "__main__":
@@ -418,6 +471,12 @@ if __name__ == "__main__":
                     help="min trust score for FULL tier")
     ap.add_argument("--limited-threshold", type=float, default=TIER_LIMITED,
                     help="min trust score for LIMITED tier")
+    ap.add_argument("--w-r", type=float, default=W_R,
+                    help="weight for role/identity factor R (default 0.5)")
+    ap.add_argument("--w-c", type=float, default=W_C,
+                    help="weight for contextual factor C (default 0.3)")
+    ap.add_argument("--w-b", type=float, default=W_B,
+                    help="weight for behavioral factor B (default 0.2)")
     args = ap.parse_args()
     DRY_RUN = args.dry_run
 
@@ -427,6 +486,20 @@ if __name__ == "__main__":
     MIN_SCORE["server"] = TIER_FULL
     MIN_SCORE["iot"] = TIER_LIMITED
     MIN_SCORE["guest"] = TIER_LIMITED
+
+    # Weights for T = wR*R + wC*C + wB*B. Configurable so the assignment can be
+    # swept for the sensitivity analysis requested by the reviewers, without
+    # editing the source between runs. Rebinding these module-level names also
+    # updates trust_score(), which reads them as globals at call time.
+    weight_sum = args.w_r + args.w_c + args.w_b
+    if abs(weight_sum - 1.0) > 1e-6:
+        raise SystemExit(
+            f"weights must sum to 1.0 (got {weight_sum:.3f}): "
+            f"w-r={args.w_r}, w-c={args.w_c}, w-b={args.w_b}"
+        )
+    W_R, W_C, W_B = args.w_r, args.w_c, args.w_b
+    print(f"[config] T = {W_R:g}R + {W_C:g}C + {W_B:g}B | "
+          f"FULL>={TIER_FULL:g}, LIMITED>={TIER_LIMITED:g}, DENIED<{TIER_LIMITED:g}")
 
     # Closed-by-default baseline; session ALLOW rules have higher priority.
     install_default_deny()
