@@ -4,13 +4,16 @@ ZTNA CLI client for Mininet hosts.
 
 Examples:
   Interactive:
-    mininet> h1 python3 /home/ubuntu/mini-projects/pep_client_fixed.py
+    mininet> h1 python3 /home/ubuntu/mini-projects/pep_client.py
 
   Deterministic stdin password:
-    mininet> h1 bash -lc 'printf "%s\n" "research123" | python3 /home/ubuntu/mini-projects/pep_client_fixed.py --username alice --password-stdin'
+    mininet> h1 bash -lc 'printf "%s\n" "research123" | python3 /home/ubuntu/mini-projects/pep_client.py --username ratih --password-stdin'
+
+  Login then probe the granted HTTP resources:
+    mininet> h1 python3 /home/ubuntu/mini-projects/pep_client.py --probe
 
   Logout:
-    mininet> h1 python3 /home/ubuntu/mini-projects/pep_client_fixed.py --logout TOKEN
+    mininet> h1 python3 /home/ubuntu/mini-projects/pep_client.py --logout TOKEN
 """
 
 import argparse
@@ -18,6 +21,7 @@ import json
 import socket
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -132,8 +136,51 @@ def print_grants(granted):
         print(f"  {resource:8s} ports [{ports}]   path {path}")
 
 
+def probe_grants(granted, timeout=4):
+    """Try an HTTP GET on every granted resource:port (data-plane check).
+
+    Reports status, latency, and payload size so the flow rule's effect can be
+    observed from the client side (@ --probe). Resources behind blocked flows
+    will report 'unreachable' instead of an HTTP status.
+    """
+    if not granted:
+        print("  (nothing to probe)")
+        return
+
+    for resource, info in granted.items():
+        res_ip = info.get("ip")
+        for port in info.get("ports", []):
+            url = f"http://{res_ip}:{port}/"
+            started = time.perf_counter()
+            try:
+                with _OPENER.open(url, timeout=timeout) as response:
+                    body = response.read()
+                    elapsed = (time.perf_counter() - started) * 1000
+                    print(
+                        f"  {resource:8s} {res_ip}:{port:<5} -> HTTP {response.status} "
+                        f"{len(body)}B  {elapsed:.1f} ms"
+                    )
+            except urllib.error.HTTPError as exc:
+                elapsed = (time.perf_counter() - started) * 1000
+                print(
+                    f"  {resource:8s} {res_ip}:{port:<5} -> HTTP {exc.code} "
+                    f"{elapsed:.1f} ms"
+                )
+            except (urllib.error.URLError, TimeoutError, socket.timeout):
+                elapsed = (time.perf_counter() - started) * 1000
+                print(
+                    f"  {resource:8s} {res_ip}:{port:<5} -> unreachable "
+                    f"(blocked or no listener) after {elapsed:.1f} ms"
+                )
+
+
 def login(args):
     ip, mac = local_identity()
+
+    if args.ip:
+        ip = args.ip
+    if args.mac:
+        mac = args.mac
 
     if not ip or not mac:
         print(f"! cannot determine Mininet identity: ip={ip!r}, mac={mac!r}")
@@ -150,6 +197,7 @@ def login(args):
             f"password_length={len(password)} ip={ip!r} mac={mac!r}"
         )
 
+    started = time.perf_counter()
     status, response = post(
         "/login",
         {
@@ -159,6 +207,7 @@ def login(args):
             "mac": mac,
         },
     )
+    login_ms = (time.perf_counter() - started) * 1000
 
     if status is None:
         print("!", response.get("error", "cannot reach PDP"))
@@ -180,25 +229,40 @@ def login(args):
     )
     print_grants(response.get("granted", {}))
 
+    provision = response.get("provision_ms")
+    timing = f"client login round-trip: {login_ms:.1f} ms"
+    if provision is not None:
+        timing += f"  (PDP provisioning: {provision} ms)"
+    print(timing)
+
+    if args.probe:
+        print("\n== data-plane probe ==")
+        probe_grants(response.get("granted", {}))
+
     token = response["token"]
     print(f"\nsession token: {token}")
     print("flows stay active until you revoke them:")
     print(
         "    h1 python3 /home/ubuntu/mini-projects/"
-        f"pep_client_fixed.py --logout {token}"
+        f"pep_client.py --logout {token}"
     )
     return 0
 
 
 def logout(token):
+    started = time.perf_counter()
     status, response = post("/logout", {"token": token})
+    logout_ms = (time.perf_counter() - started) * 1000
 
     if status is None:
         print("!", response.get("error", "cannot reach PDP"))
         return 3
 
     if response.get("ok"):
-        print("logged out (flows revoked)")
+        revoke = response.get("revoke_ms")
+        detail = f" ({revoke} ms)" if revoke is not None else ""
+        print(f"logged out (flows revoked{detail})")
+        print(f"client logout round-trip: {logout_ms:.1f} ms")
         return 0
 
     print(f"logout failed ({status}): {response}")
@@ -214,6 +278,20 @@ def parse_args():
         help="read exactly one password line from stdin",
     )
     parser.add_argument("--logout", metavar="TOKEN")
+    parser.add_argument(
+        "--ip",
+        help="[lab testing] report this IP instead of the host's own",
+    )
+    parser.add_argument(
+        "--mac",
+        help="[lab testing] report this MAC instead of the host's own "
+             "(used to exercise the IP/MAC-mismatch policy path)",
+    )
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="after login, HTTP-probe every granted resource:port",
+    )
     parser.add_argument(
         "--debug",
         action="store_true",

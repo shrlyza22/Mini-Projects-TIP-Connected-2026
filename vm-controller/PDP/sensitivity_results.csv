@@ -1,0 +1,12 @@
+section,config,wR,wC,wB,FULL,LIMITED,DENIED
+weights,Baseline (paper),0.5,0.3,0.2,90.0 (FULL),69.0 (LIMITED),38.0 (DENIED)
+weights,Alt-1 (flatter),0.45,0.25,0.3,91.0 (FULL),69.5 (LIMITED),38.0 (DENIED)
+weights,Alt-2 (context-heavy),0.4,0.4,0.2,92.0 (FULL),66.0 (LIMITED),40.0 (LIMITED)
+weights,Alt-3 (behaviour-heavy),0.4,0.2,0.4,92.0 (FULL),70.0 (FULL),38.0 (DENIED)
+weights,Alt-4 (identity-heavy),0.6,0.3,0.1,88.0 (FULL),70.0 (FULL),37.0 (DENIED)
+weights,Alt-5 (uniform),0.3333333333333333,0.3333333333333333,0.3333333333333333,93.3 (FULL),66.7 (LIMITED),40.0 (LIMITED)
+thresholds,Baseline 70/40,70,40,90.0 -> FULL,69.0 -> LIMITED,38.0 -> DENIED
+thresholds,Looser 65/35,65,35,90.0 -> FULL,69.0 -> FULL,38.0 -> LIMITED
+thresholds,Stricter 75/45,75,45,90.0 -> FULL,69.0 -> LIMITED,38.0 -> DENIED
+thresholds,Limited@50,70,50,90.0 -> FULL,69.0 -> LIMITED,38.0 -> DENIED
+thresholds,Lower 60/30,60,30,90.0 -> FULL,69.0 -> FULL,38.0 -> LIMITED

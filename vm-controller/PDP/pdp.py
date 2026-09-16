@@ -44,6 +44,15 @@ ALLOWED_HOURS = range(0, 24)       # e.g. range(7, 22) for 07:00-21:59 only
 W_R, W_C, W_B = 0.5, 0.3, 0.2
 TIER_FULL, TIER_LIMITED = 70, 40   # >= 70: FULL, >= 40: LIMITED, < 40: DENIED
 
+# Contextual / behavioral penalty magnitudes. Exposed as module globals so the
+# sensitivity analysis requested by the reviewers can sweep them via CLI
+# without editing the source between runs.
+PENALTY_IP = 40          # IP outside the expected data subnet
+PENALTY_HOURS = 30       # access outside ALLOWED_HOURS
+PENALTY_MAC = 50         # IP/MAC binding mismatch
+PENALTY_FAIL = 15        # per failed authentication
+PENALTY_FAIL_CAP = 60    # maximum total behavioral penalty
+
 # Base identity score per role
 R_BY_ROLE = {"research": 80, "server": 95, "iot": 50, "guest": 30}
 
@@ -152,17 +161,17 @@ def context_score(ip, reported_mac):
     except ValueError:
         in_subnet = False
     if not in_subnet:
-        score -= 40; reasons.append("ip outside data subnet")
+        score -= PENALTY_IP; reasons.append("ip outside data subnet")
     if datetime.now().hour not in ALLOWED_HOURS:
-        score -= 30; reasons.append("outside allowed hours")
+        score -= PENALTY_HOURS; reasons.append("outside allowed hours")
     expected_mac = HOST.get(ip, (None, None, None))[1]
     if expected_mac and reported_mac and reported_mac.lower() != expected_mac.lower():
-        score -= 50; reasons.append("mac/ip binding mismatch")
+        score -= PENALTY_MAC; reasons.append("mac/ip binding mismatch")
     return max(0, score), reasons
 
 
 def behaviour_score(failed_logins):
-    return max(0, 100 - min(failed_logins * 15, 60))
+    return max(0, 100 - min(failed_logins * PENALTY_FAIL, PENALTY_FAIL_CAP))
 
 
 def trust_score(role, ip, mac, failed_logins):
@@ -399,6 +408,7 @@ def login():
     t0 = time.perf_counter()
     for dst_seg, info in granted.items():
         dst_ip = SEG_IP[dst_seg]
+        info["ip"] = dst_ip
         path = None
         for port in info["ports"]:
             session_flows, path = provision_session(ip, mac, dst_ip, port)
@@ -477,6 +487,16 @@ if __name__ == "__main__":
                     help="weight for contextual factor C (default 0.3)")
     ap.add_argument("--w-b", type=float, default=W_B,
                     help="weight for behavioral factor B (default 0.2)")
+    ap.add_argument("--penalty-ip", type=float, default=PENALTY_IP,
+                    help="context penalty for IP outside subnet (default 40)")
+    ap.add_argument("--penalty-hours", type=float, default=PENALTY_HOURS,
+                    help="context penalty for outside allowed hours (default 30)")
+    ap.add_argument("--penalty-mac", type=float, default=PENALTY_MAC,
+                    help="context penalty for IP/MAC mismatch (default 50)")
+    ap.add_argument("--penalty-fail", type=float, default=PENALTY_FAIL,
+                    help="behavioral penalty per failed login (default 15)")
+    ap.add_argument("--penalty-fail-cap", type=float, default=PENALTY_FAIL_CAP,
+                    help="maximum behavioral penalty (default 60)")
     args = ap.parse_args()
     DRY_RUN = args.dry_run
 
@@ -497,9 +517,21 @@ if __name__ == "__main__":
             f"weights must sum to 1.0 (got {weight_sum:.3f}): "
             f"w-r={args.w_r}, w-c={args.w_c}, w-b={args.w_b}"
         )
+    for name, value in (("w-r", args.w_r), ("w-c", args.w_c), ("w-b", args.w_b)):
+        if not 0.0 <= value <= 1.0:
+            raise SystemExit(f"weight {name} must be within [0, 1] (got {value})")
     W_R, W_C, W_B = args.w_r, args.w_c, args.w_b
+
+    PENALTY_IP = args.penalty_ip
+    PENALTY_HOURS = args.penalty_hours
+    PENALTY_MAC = args.penalty_mac
+    PENALTY_FAIL = args.penalty_fail
+    PENALTY_FAIL_CAP = args.penalty_fail_cap
+
     print(f"[config] T = {W_R:g}R + {W_C:g}C + {W_B:g}B | "
           f"FULL>={TIER_FULL:g}, LIMITED>={TIER_LIMITED:g}, DENIED<{TIER_LIMITED:g}")
+    print(f"[config] penalties: ip={PENALTY_IP:g} hours={PENALTY_HOURS:g} "
+          f"mac={PENALTY_MAC:g} fail={PENALTY_FAIL:g} cap={PENALTY_FAIL_CAP:g}")
 
     # Closed-by-default baseline; session ALLOW rules have higher priority.
     install_default_deny()
