@@ -21,7 +21,7 @@ switch, threshold **FULL ≥ 70 / LIMITED 40–69 / DENIED < 40**, bobot
 | R3-1 | Kenapa 0.5/0.3/0.2 bukan 0.45/0.25/0.30; tunjukkan hasil empiris | Eksperimen | ✅ `Alt-1` di Bagian 5 |
 | R3-2 | Justifikasi kenapa **bukan** ML/AI | Tulis | ⏳ bahan di Bagian 9 |
 | R3-3 | Skala topologi (ABILENE/GEANT) | Eksperimen | ⏳ Fase C |
-| R3-4 | Performance metrics (latency PDP, load ODL, throughput OVS) | Eksperimen | 🟡 parsial: `provision_ms`, `revoke_ms`, `/metrics`, `--probe` |
+| R3-4 | Performance metrics (latency PDP, load ODL, throughput OVS) | Eksperimen | ✅ latency provisioning/revocation + load ODL terukur (`perf_collect.py`, `perf_results.md`); throughput OVS belum |
 
 ---
 

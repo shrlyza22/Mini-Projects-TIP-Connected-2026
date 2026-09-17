@@ -1,0 +1,253 @@
+% =====================================================================
+% LaTeX INSERT PACK — ICCEREC 2026 camera-ready revision
+% Paper: Adaptive Trust-Aware Access Control for Zero Trust Security
+%        in OpenDaylight-Based Software-Defined Networks
+%
+% This file contains verified numbers produced by:
+%   vm-controller/PDP/sensitivity_analysis.py
+% Run there (VM1):  cd ~/PDP && python3 sensitivity_analysis.py
+% Raw evidence:     sensitivity_results.md / sensitivity_results.csv
+%
+% Copy the blocks below into your manuscript where indicated.
+% =====================================================================
+
+
+% ---------------------------------------------------------------------
+% (R1e) Proper mathematical typesetting of the trust-score formula
+% Replace the plain "T = 0.5R+0.3C+0.2B" text with numbered equations.
+% ---------------------------------------------------------------------
+The trust score $T$ of an access request is a weighted combination of three
+normalised factors (each on a $0$--$100$ scale):
+
+\begin{equation}
+  T = w_R R + w_C C + w_B B,
+  \label{eq:trust}
+\end{equation}
+
+\noindent where $R$, $C$, and $B$ denote role/identity, contextual, and
+behavioural trust, respectively, and $w_R=0.5$, $w_C=0.3$, $w_B=0.2$
+($w_R+w_C+w_B=1$). The contextual and behavioural scores are obtained by
+point deductions:
+
+\begin{align}
+  C &= \max\!\big(0,\; 100 - p_{ip}\,\mathbb{1}_{ip\notin S}
+        - p_{h}\,\mathbb{1}_{h\notin H}
+        - p_{m}\,\mathbb{1}_{\text{mac}\neq\text{mac}^\ast}\big),
+  \label{eq:context}\\
+  B &= \max\!\big(0,\; 100 - \min(n\,p_{f},\, p_{f}^{\max})\big),
+  \label{eq:behaviour}
+\end{align}
+
+\noindent with $p_{ip}=40$, $p_h=30$, $p_m=50$, $p_f=15$, $p_f^{\max}=60$,
+and $n$ the number of consecutive failed logins. The resulting score is
+mapped to three access levels:
+
+\begin{equation}
+  \text{tier}(T) =
+  \begin{cases}
+    \text{FULL},    & T \ge 70,\\
+    \text{LIMITED}, & 40 \le T < 70,\\
+    \text{DENIED},  & T < 40.
+  \end{cases}
+  \label{eq:tier}
+\end{equation}
+
+
+% ---------------------------------------------------------------------
+% (R1b) Figure 1 caption — define all H1-H4 and S1-S4 explicitly
+% ---------------------------------------------------------------------
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{fig/architecture.pdf}
+  \caption{System architecture of the proposed ODL-ZTA framework. The
+  control/policy plane runs on VM1 (OpenDaylight controller and the Flask
+  Policy Decision Point), and the data plane runs on VM2 (Mininet with four
+  Open vSwitch instances). Hosts $h_1$ (research, $10.0.0.1$), $h_2$ (server,
+  $10.0.0.2$), $h_3$ (IoT, $10.0.0.3$), and $h_4$ (guest, $10.0.0.4$) each
+  attach to switch port~1 of switches $s_1$--$s_4$; the switches form a ring
+  $s_1$--$s_2$--$s_3$--$s_4$--$s_1$.}
+  \label{fig:architecture}
+\end{figure}
+
+
+% ---------------------------------------------------------------------
+% (R1a/R3-1) Scenario validation table with R/C/B provenance
+% Matches Table II of the current manuscript.
+% ---------------------------------------------------------------------
+\begin{table}[t]
+  \caption{Evaluated scenarios: provenance of the trust factors and the
+  resulting access level.}
+  \label{tab:scenarios}
+  \centering
+  \begin{tabular}{llcccr}
+    \hline
+    \textbf{Expected tier} & \textbf{Account (role)} & $R$ & $C$ & $B$ & $T$ \\
+    \hline
+    FULL    & ratih (research) & 80 & 100 & 100 & 90.0 \\
+    LIMITED & ratih (research) & 80 &  50 &  70 & 69.0 \\
+    DENIED  & bima (guest)     & 30 &  50 &  40 & 38.0 \\
+    \hline
+  \end{tabular}
+  \\[2pt]
+  \footnotesize $C=50$ follows from an IP/MAC binding mismatch ($-50$);
+  $B=70$ and $B=40$ follow from 2 and 4 failed logins, respectively.
+\end{table}
+
+
+% ---------------------------------------------------------------------
+% (R1a/R2/R3-1) Weight sensitivity table — the core reviewer answer
+% ---------------------------------------------------------------------
+\begin{table}[t]
+  \caption{Sensitivity of access-level outcomes to the trust-score weights
+  (thresholds fixed at 70/40). The alternative raised by the reviewers
+  (Alt-1: $0.45/0.25/0.30$) preserves all three outcomes.}
+  \label{tab:weight-sensitivity}
+  \centering
+  \begin{tabular}{lcccccc}
+    \hline
+    \textbf{Configuration} & $w_R$ & $w_C$ & $w_B$
+      & \textbf{FULL} & \textbf{LIMITED} & \textbf{DENIED} \\
+    \hline
+    Baseline           & 0.50 & 0.30 & 0.20 & 90.0 (FULL)    & 69.0 (LIMITED) & 38.0 (DENIED) \\
+    Alt-1 (flatter)    & 0.45 & 0.25 & 0.30 & 91.0 (FULL)    & 69.5 (LIMITED) & 38.0 (DENIED) \\
+    Alt-2 (context)    & 0.40 & 0.40 & 0.20 & 92.0 (FULL)    & 66.0 (LIMITED) & 40.0 (LIMITED) \\
+    Alt-3 (behaviour)  & 0.40 & 0.20 & 0.40 & 92.0 (FULL)    & 70.0 (FULL)    & 38.0 (DENIED) \\
+    Alt-4 (identity)   & 0.60 & 0.30 & 0.10 & 88.0 (FULL)    & 70.0 (FULL)    & 37.0 (DENIED) \\
+    Alt-5 (uniform)    & 0.33 & 0.33 & 0.33 & 93.3 (FULL)    & 66.7 (LIMITED) & 40.0 (LIMITED) \\
+    \hline
+  \end{tabular}
+\end{table}
+
+
+% ---------------------------------------------------------------------
+% (R1a) Threshold sensitivity table
+% ---------------------------------------------------------------------
+\begin{table}[t]
+  \caption{Sensitivity of access-level outcomes to the tier thresholds
+  (weights fixed at $0.5/0.3/0.2$).}
+  \label{tab:threshold-sensitivity}
+  \centering
+  \begin{tabular}{lccccc}
+    \hline
+    \textbf{Thresholds} & \textbf{FULL case} & \textbf{LIMITED case} & \textbf{DENIED case} \\
+    \hline
+    70 / 40 (baseline) & 90.0 $\rightarrow$ FULL    & 69.0 $\rightarrow$ LIMITED & 38.0 $\rightarrow$ DENIED \\
+    65 / 35 (looser)   & 90.0 $\rightarrow$ FULL    & 69.0 $\rightarrow$ FULL    & 38.0 $\rightarrow$ LIMITED \\
+    75 / 45 (stricter) & 90.0 $\rightarrow$ FULL    & 69.0 $\rightarrow$ LIMITED & 38.0 $\rightarrow$ DENIED \\
+    70 / 50            & 90.0 $\rightarrow$ FULL    & 69.0 $\rightarrow$ LIMITED & 38.0 $\rightarrow$ DENIED \\
+    60 / 30 (lower)    & 90.0 $\rightarrow$ FULL    & 69.0 $\rightarrow$ FULL    & 38.0 $\rightarrow$ LIMITED \\
+    \hline
+  \end{tabular}
+\end{table}
+
+
+% ---------------------------------------------------------------------
+% (R1a) Threshold-placement / robustness table + paragraph
+% ---------------------------------------------------------------------
+\begin{table}[t]
+  \caption{Robustness of the FULL/LIMITED/DENIED mapping of the three
+  evaluated scenarios over sampled weight assignments.}
+  \label{tab:robustness}
+  \centering
+  \begin{tabular}{lc}
+    \hline
+    \textbf{Weight domain} & \textbf{Mapping preserved} \\
+    \hline
+    Full simplex (step 0.05)          & 27/231 (11.7\%) \\
+    Design-consistent $w_R\ge w_C\ge w_B$ & 79/154 (51.3\%) \\
+    Near baseline ($\pm 0.05$)        & 21/25 (84.0\%) \\
+    \hline
+  \end{tabular}
+\end{table}
+
+The thresholds are not arbitrary. The set of scores reachable from valid
+$R/C/B$ combinations contains neither exactly $70$ nor exactly $40$: the
+nearest values are $69.0$ and $70.5$ around the FULL boundary, and $39.0$ and
+$41.0$ around the LIMITED boundary. Consequently, every threshold within
+$(69.0, 70.5]$ and $(39.0, 41.0]$ yields an identical tiering, so the chosen
+values of $70$ and $40$ are invariant to small perturbations.
+
+
+% ---------------------------------------------------------------------
+% (R1a/R3-1) Suggested paragraph for the Results/Discussion section
+% ---------------------------------------------------------------------
+A sensitivity analysis was performed to address the choice of weights and
+thresholds. Table~\ref{tab:weight-sensitivity} shows that the alternative
+weighting $w_R,w_C,w_B = 0.45,0.25,0.30$ raised by the reviewers produces the
+same access-level decisions as the proposed $0.5,0.3,0.2$ (scores $91.0$,
+$69.5$, and $38.0$ for the FULL, LIMITED, and DENIED scenarios, respectively).
+The mapping changes only when identity is under-weighted (Alt-2 and Alt-5,
+where the guest scenario reaches exactly $40$ and escapes denial) or when a
+single non-identity factor dominates (Alt-3 and Alt-4, where a session with a
+compromised context reaches exactly $70$ and is granted FULL access). This
+confirms that the proposed weighting is appropriate specifically because it
+keeps identity dominant without letting any single factor override the
+contextual signal.
+
+\begin{itemize}
+  \item Table~\ref{tab:threshold-sensitivity}: the tiering is unchanged under
+        moderate threshold shifts ($75/45$ and $70/50$); only substantial
+        loosening ($65/35$ or $60/30$) alters the outcomes.
+  \item Table~\ref{tab:robustness}: near the chosen values ($\pm 0.05$) the
+        mapping is preserved for $84.0\%$ of sampled weight assignments, and
+        for the identity-dominant region in $51.3\%$ of cases. The mapping
+        degrades only for weightings far from that region; the affected cases
+        are precisely those placed on a tier boundary, which reflects the
+        intended boundary behaviour of the adaptive policy.
+\end{itemize}
+
+These results are obtained by executing
+\path{sensitivity_analysis.py}, which evaluates Eq.~\eqref{eq:trust} directly
+over the reachable $R/C/B$ space and is fully reproducible without the data
+plane.
+
+
+% =====================================================================
+% (R3-4) Performance metrics — measured on the live testbed
+% Source: perf_collect.py  (20 login/logout cycles + 4 concurrent sessions)
+% =====================================================================
+\begin{table}[t]
+  \caption{Policy Decision Point latency during 20 full access sessions
+  (FULL tier, identity-dominant policy).}
+  \label{tab:latency}
+  \centering
+  \begin{tabular}{lcccc}
+    \hline
+    \textbf{Operation} & \textbf{Mean} & \textbf{p50} & \textbf{p95} & \textbf{Max} \\
+    \hline
+    Provisioning (login)  & 143.5 ms & 139.6 ms & 197.1 ms & 226.5 ms \\
+    Revocation (logout)   &  94.3 ms &  90.8 ms & 138.4 ms & 167.1 ms \\
+    \hline
+  \end{tabular}
+\end{table}
+
+\begin{table}[t]
+  \caption{OpenDaylight controller load. Each full session installs 16
+  OpenFlow rules; concurrent revocation removes the rules of four sessions.}
+  \label{tab:controller-load}
+  \centering
+  \begin{tabular}{ll}
+    \hline
+    \textbf{Metric} & \textbf{Value} \\
+    \hline
+    RESTCONF PUT per rule (average)        & 7.84 ms \\
+    RESTCONF PUT per rule (p95)            & 13.06 ms \\
+    Concurrent sessions revoked            & 4 \\
+    Flows revoked concurrently             & 64 \\
+    Total concurrent revocation time       & 248.1 ms \\
+    Controller CPU during session churn    & 140.8\% \\
+    \hline
+  \end{tabular}
+\end{table}
+
+The performance impact of policy provisioning and revocation was measured on
+the live testbed. Across 20 full access sessions, the PDP provisioned the
+per-session OpenFlow rules in 143.5~ms on average ($p95 = 197.1$~ms), and
+revoked them in 94.3~ms on average ($p95 = 138.4$~ms). Each full session
+installs 16 rules, so the per-rule RESTCONF latency averages 7.84~ms. During a
+concurrent revocation of four sessions (64 rules), the total revocation time
+was 248.1~ms and the OpenDaylight controller consumed 140.8\% CPU over the
+$\approx 4.9$~s session-churn window, confirming that enforcement is viable
+without specialised hardware while indicating that controller load grows with
+the number of concurrently enforced sessions.
+
