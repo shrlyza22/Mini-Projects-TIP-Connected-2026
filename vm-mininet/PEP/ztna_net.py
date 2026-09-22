@@ -14,7 +14,7 @@ testing, both are now installed manually — but NOT the same way:
   - priority=0 default-drop stays a plain dpctl flow. It's a belt-and-
     braces rule only: fail-mode=secure already drops anything unmatched,
     so it's fine if this particular flow disappears on reconciliation.
-  - priority=100 LLDP-punt AND the priority=200 PDP carveout are both
+  - priority=100 LLDP-punt AND the priority=300 PDP carveout are both
     pushed via RESTCONF into ODL's config datastore instead of dpctl.
     A flow added straight to OVS is invisible to ODL and gets wiped the
     moment openflowplugin resyncs the switch (which happens shortly
@@ -46,6 +46,13 @@ GW_IP   = "10.0.0.254"         # NAT gateway on s1 (data-plane side)
 RESTCONF_BASE = f"http://{ODL_IP}:8181/rests/data"
 RESTCONF_AUTH = HTTPBasicAuth("admin", "admin")
 
+# Reachability carve-outs must outrank BOTH the PDP default-deny (priority 200)
+# and the per-session ALLOW rules (priority 250). At 200 the return-direction
+# carve-out (src=PDP -> dst=host) collided with the default-deny rule for the
+# host IP, which made PDP replies non-deterministically dropped and login time
+# out. 300 keeps traffic to/from the PDP portal always reachable.
+CARVEOUT_PRIORITY = 300
+
 HOSTS = {  # name: (ip, mac, segment)
     "h1": ("10.0.0.1", "00:00:00:00:00:01", "research"),
     "h2": ("10.0.0.2", "00:00:00:00:00:02", "server"),
@@ -64,8 +71,14 @@ class RingTopo(Topo):
             h = self.addHost(name, ip="%s/24" % ip, mac=mac)
             self.addLink(h, s, port1=0, port2=1)          # host on switch port 1
             sw.append(s)
-        for i in range(4):                                # ring s1-s2-s3-s4-s1
-            self.addLink(sw[i], sw[(i + 1) % 4], port1=2, port2=3)
+        # Ring s1-s2-s3-s4-s1 using the SAME port layout as pdp.py / ring-topo.py
+        # (do not use a uniform port1=2/port2=3 pattern here: it puts the
+        # return direction on the wrong port, so server replies never reach the
+        # requesting host).
+        self.addLink(sw[0], sw[1], port1=2, port2=2)      # s1:2 <-> s2:2
+        self.addLink(sw[1], sw[2], port1=3, port2=2)      # s2:3 <-> s3:2
+        self.addLink(sw[2], sw[3], port1=3, port2=2)      # s3:3 <-> s4:2
+        self.addLink(sw[3], sw[0], port1=3, port2=3)      # s4:3 <-> s1:3
 
 
 def s1_port_to(net, node):
@@ -149,18 +162,18 @@ def _push_flow_restconf(node, flow_id, priority, match, out_port, retries=3, del
     return False
 
 
-#   Ring adjacency (fixed, matches RingTopo.build()): each switch's
-#   port1 = its own host, port2 = link "forward" to the next switch,
-#   port3 = link "back" to the previous switch, ring order s1-s2-s3-s4-s1.
+#   Ring adjacency (fixed, matches RingTopo.build() and pdp.py LINK_PORT):
+#   port1 = own host, then links per the alternating ring layout
+#   s1:2<->s2:2, s2:3<->s3:2, s3:3<->s4:2, s4:3<->s1:3.
 #
 #   Forward direction (host -> PDP): the next hop toward s1 for each
 #   switch. s2 and s4 sit directly next to s1 (1 hop); s3 is 2 hops away
 #   either direction, routed here via s2 to match the path PDP itself
 #   prints for h3/iot ("s1 -> 2 -> 3").
 FORWARD_NEXT_HOP = {
-    "openflow:2": 3,   # s2 -> s1 directly
-    "openflow:3": 3,   # s3 -> s2 (which then relays -> s1 via its own rule)
-    "openflow:4": 2,   # s4 -> s1 directly
+    "openflow:2": 2,   # s2 -> s1 directly (s2:2 <-> s1:2)
+    "openflow:3": 2,   # s3 -> s2 (s3:2 <-> s2:3)
+    "openflow:4": 3,   # s4 -> s1 directly (s4:3 <-> s1:3)
 }
 
 #   Return direction (PDP -> host): per-switch, per-destination-host
@@ -168,7 +181,7 @@ FORWARD_NEXT_HOP = {
 #   of being blindly sent out h1's port regardless of who logged in.
 RETURN_HOPS = {
     "openflow:1": {"10.0.0.1": 1, "10.0.0.2": 2, "10.0.0.3": 2, "10.0.0.4": 3},
-    "openflow:2": {"10.0.0.2": 1, "10.0.0.3": 2},
+    "openflow:2": {"10.0.0.2": 1, "10.0.0.3": 3},
     "openflow:3": {"10.0.0.3": 1},
     "openflow:4": {"10.0.0.4": 1},
 }
@@ -217,12 +230,12 @@ def install_pdp_carveout(net, nat):
 
     # Forward: dst=PDP_IP, hop toward s1 (single rule set covers every host)
     ok &= _push_flow_restconf(
-        "openflow:1", "carveout-fwd", 200,
+        "openflow:1", "carveout-fwd", CARVEOUT_PRIORITY,
         {**ip_match, "ipv4-destination": f"{ODL_IP}/32"}, nat_port,
     )
     for node, port in FORWARD_NEXT_HOP.items():
         ok &= _push_flow_restconf(
-            node, "carveout-fwd", 200,
+            node, "carveout-fwd", CARVEOUT_PRIORITY,
             {**ip_match, "ipv4-destination": f"{ODL_IP}/32"}, port,
         )
 
@@ -231,7 +244,7 @@ def install_pdp_carveout(net, nat):
         for host_ip, port in hop_table.items():
             flow_id = "carveout-ret-" + host_ip.split(".")[-1]
             ok &= _push_flow_restconf(
-                node, flow_id, 200,
+                node, flow_id, CARVEOUT_PRIORITY,
                 {**ip_match, "ipv4-source": f"{ODL_IP}/32",
                  "ipv4-destination": f"{host_ip}/32"}, port,
             )
