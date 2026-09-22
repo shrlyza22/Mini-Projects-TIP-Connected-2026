@@ -497,6 +497,11 @@ if __name__ == "__main__":
                     help="behavioral penalty per failed login (default 15)")
     ap.add_argument("--penalty-fail-cap", type=float, default=PENALTY_FAIL_CAP,
                     help="maximum behavioral penalty (default 60)")
+    ap.add_argument("--allowed-hours", default="0-24", metavar="START-END",
+                    help="allowed access hours as START-END (default 0-24). An "
+                         "empty range such as 1-1 forces the outside-hours "
+                         "penalty, which is useful to reach LIMITED without "
+                         "spoofing the MAC")
     args = ap.parse_args()
     DRY_RUN = args.dry_run
 
@@ -506,6 +511,12 @@ if __name__ == "__main__":
     MIN_SCORE["server"] = TIER_FULL
     MIN_SCORE["iot"] = TIER_LIMITED
     MIN_SCORE["guest"] = TIER_LIMITED
+
+    try:
+        _hour_start, _hour_end = (int(part) for part in args.allowed_hours.split("-", 1))
+    except ValueError:
+        raise SystemExit(f"invalid --allowed-hours {args.allowed_hours!r}; use START-END")
+    ALLOWED_HOURS = range(_hour_start, _hour_end)
 
     # Weights for T = wR*R + wC*C + wB*B. Configurable so the assignment can be
     # swept for the sensitivity analysis requested by the reviewers, without
@@ -532,6 +543,7 @@ if __name__ == "__main__":
           f"FULL>={TIER_FULL:g}, LIMITED>={TIER_LIMITED:g}, DENIED<{TIER_LIMITED:g}")
     print(f"[config] penalties: ip={PENALTY_IP:g} hours={PENALTY_HOURS:g} "
           f"mac={PENALTY_MAC:g} fail={PENALTY_FAIL:g} cap={PENALTY_FAIL_CAP:g}")
+    print(f"[config] allowed hours: {_hour_start}-{_hour_end}")
 
     # Closed-by-default baseline; session ALLOW rules have higher priority.
     install_default_deny()
