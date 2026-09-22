@@ -1,0 +1,90 @@
+% =====================================================================
+% PRIORITY REVISION PACK — ICCEREC 2026
+% Paper: Adaptive Trust-Aware Access Control ... OpenDaylight-Based SDN
+%
+% IMPORTANT: These are REPLACEMENTS for existing text, not additions.
+% Do NOT paste the sensitivity/robustness tables again (the manuscript
+% already contains them; pasting would duplicate \label names).
+%
+% Contents:
+%   1. Abstract (REPLACE)
+%   2. Robustness subsection (REPLACE the closing paragraph)
+%   3. Conclusion (REPLACE)
+% =====================================================================
+
+
+% ---------------------------------------------------------------------
+% 1. ABSTRACT  (REPLACE the current abstract)
+%    ~250 words; adds the measured enforcement performance (R3-4).
+%    Update the latency/throughput numbers to your final canonical run.
+% ---------------------------------------------------------------------
+\begin{abstract}
+Software-defined networking (SDN) enables centralized, programmable control, but
+access decisions must adapt to changing user and device conditions instead of
+trusting a network location. This study implements and evaluates a trust-aware
+adaptive access control mechanism for Zero Trust security in an
+OpenDaylight-based SDN. A trust score combines role/identity, contextual, and
+behavioral factors through normalized weights and is mapped to three access
+levels: FULL, LIMITED, and DENIED. Policy-specific OpenFlow rules are
+provisioned through the OpenDaylight RESTCONF interface and enforced on a
+Mininet--Open vSwitch data plane. In a four-switch ring, the three evaluated
+scenarios yield baseline trust scores of 90, 69, and 38; FULL grants both
+protected resources, LIMITED restricts access to the IoT service, and DENIED
+blocks both, while logout returns the data plane to default-deny. Beyond
+functional checks, the evaluation measures enforcement cost: the policy decision
+point provisioned per-session rules in about 130~ms and revoked them in about
+80~ms on average, and an authorized session sustained 71~Gbit/s through the
+switch path, whereas the default-deny and post-logout states blocked all access.
+A sensitivity analysis shows that the alternative weights 0.45/0.25/0.30
+preserve all three classifications, that the threshold pairs 75/45 and 70/50
+leave them unchanged, and that the mapping remains stable within a local
+neighborhood of the chosen weights. The weights are experimental configurations
+validated by sensitivity analysis rather than statistically optimized estimates.
+Results are reported for a four-switch ring and establish functional correctness
+together with measured enforcement performance.
+\end{abstract}
+
+
+% ---------------------------------------------------------------------
+% 2. ROBUSTNESS SUBSECTION — REPLACE the closing paragraph.
+%    Removes "sampling/grid resolution not specified" and states the
+%    actual grid and counts, while keeping the honest scope.
+% ---------------------------------------------------------------------
+The preservation rates are computed from the closed-form trust model rather than
+from data-plane measurements. Weights are enumerated on a grid of step $0.05$:
+the full simplex comprises $231$ nonnegative, sum-to-one configurations, the
+ordered domain ($w_R \ge w_C \ge w_B$) comprises $154$, and the local
+neighborhood (each weight within $\pm 0.05$ of its baseline value) comprises
+$25$. The rates are $27/231$ ($11.7\%$), $79/154$ ($51.3\%$), and $21/25$
+($84.0\%$), respectively. Because the three evaluated scenarios lie close to the
+$(70,40)$ boundaries, classification changes under remote weight assignments are
+expected and confirm that the thresholds operate at the intended decision
+boundary; near the chosen values the mapping is largely preserved. These rates
+describe the assessed grid and are not statistical confidence levels or exact
+continuous-volume fractions. The baseline weights therefore remain an
+experimental configuration validated through sensitivity analysis, not a
+statistically optimized solution.
+
+
+% ---------------------------------------------------------------------
+% 3. CONCLUSION — REPLACE the current conclusion.
+%    Removes latency/controller load from future work (now measured) and
+%    updates the future-work scope.
+% ---------------------------------------------------------------------
+The OpenDaylight-based prototype maps baseline trust scores of $90$, $69$, and
+$38$ to FULL, LIMITED, and DENIED access, with matching resource permissions and
+post-logout blocking. Beyond functional validation, the measured enforcement
+cost is modest: per-session provisioning and revocation are on the order of
+$100$~ms and $80$~ms, respectively, and an authorized session sustained
+$71$~Gbit/s through the switch path, while default-deny and post-logout states
+blocked all access. Sensitivity analysis identifies classification-preserving
+weight and threshold alternatives together with boundary cases, and the reported
+preservation rates support domain-dependent stability rather than robustness
+throughout the weight space. The weights are experimental configurations
+validated through sensitivity analysis, not statistically optimized estimates.
+The evaluation does not establish enterprise-scale viability or attack
+resilience; it validates the functional mapping from trust conditions to
+resource-specific enforcement on a four-switch ring and reports controller-side
+and data-plane performance. Future work will examine larger reference
+topologies, continuous trust reassessment, and a learned behavioral factor that
+augments the transparent trust aggregation.
