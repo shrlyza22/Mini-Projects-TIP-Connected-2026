@@ -251,3 +251,89 @@ $\approx 4.9$~s session-churn window, confirming that enforcement is viable
 without specialised hardware while indicating that controller load grows with
 the number of concurrently enforced sessions.
 
+
+% ---------------------------------------------------------------------
+% (R3-4) Data-plane throughput and per-tier reachability
+% ---------------------------------------------------------------------
+\begin{table}[t]
+  \caption{Data-plane reachability and throughput per access state.}
+  \label{tab:throughput}
+  \centering
+  \begin{tabular}{lccc}
+    \hline
+    \textbf{State} & \textbf{server:9000} & \textbf{server:8080} & \textbf{IoT:80} \\
+    \hline
+    Default-deny (pre-login) & blocked & blocked & blocked \\
+    FULL                     & 71.0 Gbit/s & HTTP 200 & HTTP 200 \\
+    LIMITED                  & blocked & blocked & HTTP 200 \\
+    Post-logout              & blocked & blocked & blocked \\
+    \hline
+  \end{tabular}
+\end{table}
+
+The data-plane effect of each access tier was verified with \texttt{iperf3} on
+the server port 9000 and with HTTP requests to the authorised resources. Under
+FULL access, the session reached \textbf{71.0~Gbit/s} (sender; 70.6~Gbit/s
+receiver) over the Open vSwitch path, compared with approximately 85~Gbit/s for
+the loopback baseline of the same host. Under LIMITED access, both server ports
+were blocked while the IoT service on port 80 still returned HTTP~200. Under
+default-deny (before authentication) and after logout, all three destinations
+were blocked. These results show that the tier decisions of the PDP are enforced
+as resource-specific reachability at the data plane, not only as a functional
+state.
+
+
+% ---------------------------------------------------------------------
+% (R3-2) Why a deterministic formulation instead of ML/AI
+% ---------------------------------------------------------------------
+\subsection{Rationale for a Deterministic Trust Formulation}
+\label{sec:why-not-ml}
+The proposed mechanism uses explicit point deductions rather than a learned
+model. This is a deliberate design choice for three reasons. First,
+network-policy enforcement requires decisions that are deterministic and
+auditable: every tier assignment in this work can be traced to a specific factor
+and penalty, whereas an LSTM- or CNN-based classifier used for anomaly detection
+\cite{guo2023intelligent} produces scores whose provenance is difficult to
+attach to a concrete flow rule. Second, the mechanism operates without labelled
+training data, which is scarce for this access-control context, and it runs
+alongside the controller on commodity hardware without a training pipeline or
+GPU. Third, learned traffic-anomaly detection and transparent policy decisions
+are complementary rather than competing: an ML model could supply a richer
+behavioural signal that replaces or augments the $B$ factor while the
+transparent aggregation in Eq.~\eqref{eq:trust} is retained. The main limitation
+of the point-deduction approach is that it cannot capture complex non-linear
+adversarial patterns; enriching the behavioural factor with learned anomaly
+scores is therefore identified as future work.
+
+
+% ---------------------------------------------------------------------
+% (R3-3) Scope of topological validation (justification, option B)
+% ---------------------------------------------------------------------
+\subsection{Scope of Topological Validation}
+\label{sec:topology-scope}
+The mechanism is topology-agnostic: the PDP derives each path with a
+breadth-first search over an adjacency graph and installs one flow per switch
+along that path, so no component assumes a ring. The four-switch ring is used
+as a controlled minimal topology that contains a cycle, which exercises both the
+default-deny baseline and loop handling while keeping the trust-to-policy
+mapping isolated from unrelated effects. The number of switches does not affect
+the trust computation, which depends only on the $R$, $C$, and $B$ factors, nor
+the RESTCONF provisioning procedure. The per-session deployment cost is bounded
+by the path length and the number of authorised ports, scaling linearly with the
+network size. Consequently, the evaluation establishes functional correctness
+and the correctness of the trust-to-enforcement mapping, not enterprise-scale
+viability; validation on larger reference topologies such as Abilene or GEANT is
+left as future work. One implementation requirement that emerged during testing
+is that the port mapping used by the PDP must exactly match the topology built
+in the data plane, since a mismatch silently misdirects return traffic without
+raising an error.
+
+
+% =====================================================================
+% (Opsional) Paragraf batasan untuk Conclusion
+% =====================================================================
+% The evaluation does not establish enterprise-scale viability or resistance to
+% attack; it validates the functional mapping from trust conditions to
+% resource-specific enforcement and reports measured controller-side and
+% data-plane performance for a four-switch ring topology.
+
